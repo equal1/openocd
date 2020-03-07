@@ -153,5 +153,8 @@ struct adapter_driver *adapter_drivers[] = {
 #if BUILD_AM335XGPIO == 1
 		&am335xgpio_adapter_driver,
 #endif
+#if BUILD_DIRTYJTAG == 1
+		&dirtyjtag_adapter_driver,
+#endif
 		NULL,
 	};
