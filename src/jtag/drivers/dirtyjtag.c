@@ -472,6 +472,11 @@ static int syncbb_execute_queue(void)
 					tap_set_state(TAP_RESET);
 				}
 				dirtyjtag_reset(cmd->cmd.reset->trst, cmd->cmd.reset->srst);
+				// note, we can't just leave the reset lines active, so if we pulled either low, bring'em back up
+				if ( !cmd->cmd.reset->trst || !cmd->cmd.reset->srst ) {
+					usleep(100000); // 100ms should do
+					dirtyjtag_reset(1, 1);
+				}
 				break;
 
 			case JTAG_RUNTEST:
