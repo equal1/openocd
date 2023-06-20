@@ -71,6 +71,8 @@ static const uint16_t dirtyjtag_pid = 0xC0CA;
 
 static struct libusb_device_handle *usb_handle;
 
+static unsigned last_trst, last_srst;
+
 /**
  * Utils
  */
@@ -188,7 +190,7 @@ static void dirtyjtag_clk(int num_cycles, int tms, int tdi)
  * Control /TRST and /SYSRST pins.
  * Perform immediate bitbang transaction.
  */
-static void dirtyjtag_reset(int trst, int srst)
+static int dirtyjtag_reset(int trst, int srst)
 {
 	uint8_t command[] = {
 		CMD_SETSIG,
@@ -199,6 +201,10 @@ static void dirtyjtag_reset(int trst, int srst)
 	LOG_DEBUG("dirtyjtag_reset(%d,%d)", trst, srst);
 	dirtyjtag_buffer_append(command, sizeof(command)/sizeof(command[0]));
 	dirtyjtag_buffer_flush();
+
+	last_trst = trst; last_srst = srst;
+
+	return ERROR_OK;
 }
 
 static int dirtyjtag_speed(int divisor)
@@ -218,6 +224,9 @@ static int dirtyjtag_init(void)
 {
 	uint16_t avids[] = {dirtyjtag_vid, 0};
 	uint16_t apids[] = {dirtyjtag_pid, 0};
+
+	LOG_DEBUG("dirtyjtag_init()");
+
 	if (jtag_libusb_open(avids, apids, &usb_handle, NULL)) {
 		LOG_ERROR("dirtyjtag not found: vid=%04x, pid=%04x\n",
 			dirtyjtag_vid, dirtyjtag_pid);
@@ -228,6 +237,18 @@ static int dirtyjtag_init(void)
 		LOG_ERROR("unable to claim interface");
 		return ERROR_JTAG_INIT_FAILED;
 	}
+
+	// initial state: SRST# and TRST# high, the rest, low
+	uint8_t command[] = {
+		CMD_SETSIG,
+		SIG_TRST | SIG_SRST | SIG_TMS | SIG_TCK | SIG_TDO,
+		SIG_TRST | SIG_SRST,
+	};
+	dirtyjtag_buffer_append(command, sizeof(command)/sizeof(command[0]));
+	dirtyjtag_buffer_flush();
+
+	// setup initial resets' state (not asserted)
+	last_trst = 1; last_srst = 1;
 
 	return ERROR_OK;
 }
@@ -461,22 +482,6 @@ static int syncbb_execute_queue(void)
 
 	while (cmd) {
 		switch (cmd->type) {
-			case JTAG_RESET:
-				LOG_DEBUG_IO("reset trst: %i srst %i", cmd->cmd.reset->trst, cmd->cmd.reset->srst);
-
-				if ((cmd->cmd.reset->trst == 1) ||
-					(cmd->cmd.reset->srst &&
-					(jtag_get_reset_config() & RESET_SRST_PULLS_TRST))) {
-					tap_set_state(TAP_RESET);
-				}
-				dirtyjtag_reset(cmd->cmd.reset->trst, cmd->cmd.reset->srst);
-				// note, we can't just leave the reset lines active, so if we pulled either low, bring'em back up
-				if ( !cmd->cmd.reset->trst || !cmd->cmd.reset->srst ) {
-					usleep(100000); // 100ms should do
-					dirtyjtag_reset(1, 1);
-				}
-				break;
-
 			case JTAG_RUNTEST:
 				LOG_DEBUG_IO("runtest %i cycles, end in %s", cmd->cmd.runtest->num_cycles,
 					tap_state_name(cmd->cmd.runtest->end_state));
@@ -492,6 +497,10 @@ static int syncbb_execute_queue(void)
 
 			case JTAG_TLR_RESET: /* renamed from JTAG_STATEMOVE */
 				LOG_DEBUG_IO("statemove end in %s", tap_state_name(cmd->cmd.statemove->end_state));
+
+				// if by any chance we've TRST# or SRST# asserted, turn them high first
+				if (!last_trst || !last_srst)
+					dirtyjtag_reset(1, 1);
 
 				syncbb_end_state(cmd->cmd.statemove->end_state);
 				syncbb_state_move(0);
@@ -549,6 +558,7 @@ struct adapter_driver dirtyjtag_adapter_driver = {
 
 	.init = dirtyjtag_init,
 	.quit = dirtyjtag_quit,
+	.reset = dirtyjtag_reset,
 	.speed = dirtyjtag_speed,
 	.khz = dirtyjtag_khz,
 	.speed_div = dirtyjtag_speed_div,
