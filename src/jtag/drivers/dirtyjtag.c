@@ -44,7 +44,7 @@
  */
 static const uint8_t ep_write = 0x01;
 static const uint8_t ep_read = 0x82;
-#define DIRTYJTAG_USB_TIMEOUT 100
+#define DIRTYJTAG_USB_TIMEOUT 200
 static const uint16_t dirtyjtag_vid = 0x1209;
 static const uint16_t dirtyjtag_pid = 0xC0CA;
 
