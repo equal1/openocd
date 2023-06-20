@@ -376,9 +376,9 @@ static void syncbb_scan(bool ir_scan, enum scan_type type, uint8_t *buffer, int 
 	tap_state_t saved_end_state = tap_get_end_state();
 	int sent_bits, sent_bytes, read, res;
 	size_t i, buffer_pos = 0;
-	uint8_t xfer_rx[32], xfer_tx[32] = {
+	uint8_t xfer_rx[31], xfer_tx[33] = {
 		CMD_XFER,
-		0
+		0 // this is the limit on buffer size - max 255bits (31.875bytes) per transfer
 	};
 	int pos_last_byte = (scan_size-1)/8;
 	int pos_last_bit = (scan_size-1)%8;
@@ -402,33 +402,31 @@ static void syncbb_scan(bool ir_scan, enum scan_type type, uint8_t *buffer, int 
 	}
 
 	while (scan_size > 0) {
-		sent_bits = min(240, scan_size);
+		sent_bits = min(((sizeof(xfer_tx) - 2) * 8), scan_size);
 		sent_bytes = (sent_bits+7)/8;
 
 		if (type != SCAN_IN) {
-			memcpy(&xfer_tx[2], &buffer[buffer_pos], sent_bytes);
-			for (i = 2; i < 32; i++) {
-				xfer_tx[i] = swap_bits(xfer_tx[i]);
+			for (i = 0; i < (size_t)sent_bytes; i++) {
+				xfer_tx[2 + i] = swap_bits(buffer[buffer_pos + i]);
 			}
 		} else {
 			/* Set TDO to 0 */
-			memset(&xfer_tx[2], 0, 30);
+			memset(&xfer_tx[2], 0, sent_bytes);
 		}
 		xfer_tx[1] = sent_bits;
 
-		dirtyjtag_buffer_append(xfer_tx, 32);
+		dirtyjtag_buffer_append(xfer_tx, 2 + sent_bytes);
 		dirtyjtag_buffer_flush();
 
 		read = 0;
 		res = jtag_libusb_bulk_read(usb_handle, ep_read,
-			(char*)xfer_rx, 32, DIRTYJTAG_USB_TIMEOUT, &read);
+			(char*)xfer_rx, sent_bytes, DIRTYJTAG_USB_TIMEOUT, &read);
 		assert(res == ERROR_OK);
-		assert(read == 32);
+		assert(read == sent_bytes);
 		if (type != SCAN_OUT) {
-			for (i = 0; i < 32; i++) {
-				xfer_rx[i] = swap_bits(xfer_rx[i]);
+			for (i = 0; i < (size_t)sent_bytes; i++) {
+				buffer[buffer_pos + i] = swap_bits(xfer_rx[i]);
 			}
-			memcpy(&buffer[buffer_pos], xfer_rx, sent_bytes);
 		}
 
 		scan_size -= sent_bits;
