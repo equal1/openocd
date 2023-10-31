@@ -227,7 +227,7 @@ static int dirtyjtag_init(void)
 
 	LOG_DEBUG("dirtyjtag_init()");
 
-	if (jtag_libusb_open(avids, apids, &usb_handle, NULL)) {
+	if (jtag_libusb_open(avids, apids, NULL, &usb_handle, NULL)) {
 		LOG_ERROR("dirtyjtag not found: vid=%04x, pid=%04x\n",
 			dirtyjtag_vid, dirtyjtag_pid);
 		return ERROR_JTAG_INIT_FAILED;
