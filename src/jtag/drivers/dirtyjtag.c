@@ -55,9 +55,13 @@ static const uint16_t dirtyjtag_pid = 0xC0CA;
 #define CMD_INFO 0x01
 #define CMD_FREQ 0x02
 #define CMD_XFER 0x03
+#define CMD_XFER_LARGE 0x43
+#define CMD_XFER_NOREAD 0x83
+#define CMD_XFER_LARGE_NOREAD 0xC3
 #define CMD_SETSIG 0x04
 #define CMD_GETSIG 0x05
 #define CMD_CLK 0x06
+#define CMD_CLK_READOUT 0x86
 
 /**
  * DirtyJTAG signal definitions
@@ -143,28 +147,6 @@ static void dirtyjtag_write(int tck, int tms, int tdi)
 }
 
 /**
- * Read TDO pin
- */
-static bool dirtyjtag_get_tdo(void)
-{
-	int res, read = 0;
-	char state;
-	uint8_t command[] = {
-		CMD_GETSIG
-	};
-
-	dirtyjtag_buffer_append(command, sizeof(command)/sizeof(command[0]));
-	dirtyjtag_buffer_flush();
-
-	res = jtag_libusb_bulk_read(usb_handle, ep_read,
-		&state, 1, DIRTYJTAG_USB_TIMEOUT, &read);
-	assert(res == ERROR_OK);
-	assert(read == 1);
-
-	return !!(state & SIG_TDO);
-}
-
-/**
  * Send bunch of clock pulses
  */
 static void dirtyjtag_clk(int num_cycles, int tms, int tdi)
@@ -184,6 +166,29 @@ static void dirtyjtag_clk(int num_cycles, int tms, int tdi)
 		num_cycles -= min(255, num_cycles);
 		dirtyjtag_buffer_append(command, sizeof(command)/sizeof(command[0]));
 	}
+}
+
+/**
+ * Send a single clock pulse, and capture tdo
+ */
+static bool dirtyjtag_clk_gettdo(int tms, int tdi)
+{
+	uint8_t command[] = {
+		CMD_CLK_READOUT,
+		(tms ? SIG_TMS : 0) | (tdi ? SIG_TDI : 0),
+		1
+	};
+	char state;
+
+	dirtyjtag_buffer_append(command, sizeof(command)/sizeof(command[0]));
+	dirtyjtag_buffer_flush();
+	int read = 0;
+	int res = jtag_libusb_bulk_read(usb_handle, ep_read,
+		&state, 1, DIRTYJTAG_USB_TIMEOUT, &read);
+	assert(res == ERROR_OK);
+	assert(read == 1);
+
+	return !!(state & SIG_TDO);
 }
 
 /**
@@ -397,10 +402,7 @@ static void syncbb_scan(bool ir_scan, enum scan_type type, uint8_t *buffer, int 
 	tap_state_t saved_end_state = tap_get_end_state();
 	int sent_bits, sent_bytes, read, res;
 	size_t i, buffer_pos = 0;
-	uint8_t xfer_rx[31], xfer_tx[33] = {
-		CMD_XFER,
-		0 // this is the limit on buffer size - max 255bits (31.875bytes) per transfer
-	};
+	uint8_t xfer_rx[61], xfer_tx[63];
 	int pos_last_byte = (scan_size-1)/8;
 	int pos_last_bit = (scan_size-1)%8;
 	bool last_bit = !!(buffer[pos_last_byte] & (1 << pos_last_bit));
@@ -418,13 +420,13 @@ static void syncbb_scan(bool ir_scan, enum scan_type type, uint8_t *buffer, int 
 		syncbb_end_state(saved_end_state);
 	}
 
-	if (dirtyjtag_buffer_use+32+1 > dirtyjtag_buffer_size) {
-		dirtyjtag_buffer_flush();
-	}
-
 	while (scan_size > 0) {
 		sent_bits = min(((sizeof(xfer_tx) - 2) * 8), scan_size);
 		sent_bytes = (sent_bits+7)/8;
+
+		if (dirtyjtag_buffer_use+2+sent_bytes > dirtyjtag_buffer_size) {
+			dirtyjtag_buffer_flush();
+		}
 
 		if (type != SCAN_IN) {
 			for (i = 0; i < (size_t)sent_bytes; i++) {
@@ -434,7 +436,8 @@ static void syncbb_scan(bool ir_scan, enum scan_type type, uint8_t *buffer, int 
 			/* Set TDO to 0 */
 			memset(&xfer_tx[2], 0, sent_bytes);
 		}
-		xfer_tx[1] = sent_bits;
+		xfer_tx[0] = (sent_bits >= 256) ? CMD_XFER_LARGE : CMD_XFER;
+		xfer_tx[1] = sent_bits & 0xff;
 
 		dirtyjtag_buffer_append(xfer_tx, 2 + sent_bytes);
 		dirtyjtag_buffer_flush();
@@ -454,9 +457,11 @@ static void syncbb_scan(bool ir_scan, enum scan_type type, uint8_t *buffer, int 
 		buffer_pos += sent_bytes; // equivalent to CEIL(sent_bits/8)
 	}
 
-	dirtyjtag_write(0, 1, last_bit);
-	buffer[pos_last_byte] = (buffer[pos_last_byte] & ~(1 << pos_last_bit)) | (dirtyjtag_get_tdo() << pos_last_bit);
-	dirtyjtag_clk(1, 1, last_bit);
+	bool last = dirtyjtag_clk_gettdo(1, last_bit);
+	if (! last)
+		buffer[pos_last_byte] &= ~(1 << pos_last_bit);
+	else
+	 	buffer[pos_last_byte] |= 1 << pos_last_bit;
 
 	if (tap_get_state() != tap_get_end_state()) {
 		/* we *KNOW* the above loop transitioned out of
